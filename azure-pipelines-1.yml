@@ -1,0 +1,198 @@
+# azure-pipelines.yml
+# Unified 4-stage pipeline using parameterized variable groups and TF_VAR_ environment variables
+
+trigger: none
+pr: none
+
+parameters:
+  - name: tenant
+    type: string
+    default: DWS-LAB  # Change this when running manually for a different tenant
+
+variables:
+  - group: ${{ parameters.tenant }}
+
+stages:
+
+  # --------------------------------------
+  # Stage 1: Runbook Syntax Check (CI)
+  # --------------------------------------
+  - stage: CI
+    displayName: 'Runbook Syntax Check'
+    jobs:
+      - job: BuildAndValidate
+        pool:
+          vmImage: 'windows-latest'
+        steps:
+          - task: UseDotNet@2
+            inputs:
+              packageType: 'sdk'
+              version: '7.0.x'
+              installationPath: $(Agent.ToolsDirectory)/dotnet
+
+          - task: PowerShell@2
+            inputs:
+              targetType: 'inline'
+              pwsh: true
+              script: |
+                $path = '$(runbookFilePath)'
+                try {
+                  [System.Management.Automation.PSParser]::Tokenize((Get-Content $path -Raw), [ref]$null) | Out-Null
+                  Write-Host "Syntax check passed for $path"
+                } catch {
+                  Write-Error "Syntax check failed: $($_.Exception.Message)"
+                  exit 1
+                }
+
+          - task: PublishPipelineArtifact@1
+            inputs:
+              targetPath: '$(runbookFilePath)'
+              artifact: 'runbookArtifact'
+              publishLocation: 'pipeline'
+
+  # --------------------------------------
+  # Stage 2: Terraform Deployment
+  # --------------------------------------
+  - stage: Terraform_Deployment
+    displayName: 'Terraform Deployment'
+    dependsOn: CI
+    jobs:
+      - deployment: TerraformJob
+        environment: terraform-approval-env
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: AzureCLI@2
+                  displayName: 'Terraform Init & Apply'
+                  inputs:
+                    azureSubscription: $(serviceConnection)
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    workingDirectory: terraform
+                    inlineScript: |
+                      curl -sLo terraform.zip https://releases.hashicorp.com/terraform/1.7.0/terraform_1.7.0_linux_amd64.zip
+                      unzip terraform.zip
+                      mkdir -p $HOME/bin
+                      mv terraform $HOME/bin/
+                      export PATH=$HOME/bin:$PATH
+
+                      terraform init -input=false
+                      terraform plan -input=false -out=tfplan.out
+                      terraform apply -input=false -auto-approve tfplan.out
+                  env:
+                    ARM_SUBSCRIPTION_ID: $(subscriptionId)
+                    ARM_TENANT_ID: $(tenantId)
+                    ARM_OBJECT_ID: $(objectId)
+
+                    TF_VAR_tenant_id: $(tenantId)
+                    TF_VAR_service_principal_object_id: $(objectId)
+                    TF_VAR_object_id: $(objectId)
+                    TF_VAR_resource_group_name: $(resourceGroupName)
+                    TF_VAR_location: $(location)
+
+  # --------------------------------------
+  # Stage 3: PowerShell Module Configuration
+  # --------------------------------------
+  - stage: Module_Configuration
+    displayName: 'Install PowerShell Modules'
+    dependsOn: Terraform_Deployment
+    jobs:
+      - job: ConfigureModules
+        pool:
+          vmImage: 'windows-latest'
+        steps:
+          - task: AzurePowerShell@5
+            displayName: 'Install Microsoft.Graph Modules'
+            inputs:
+              azureSubscription: $(serviceConnection)
+              ScriptType: 'InlineScript'
+              azurePowerShellVersion: 'LatestVersion'
+              pwsh: true
+              Inline: |
+                $automationAccountName = "$(automationAccountName)"
+                $resourceGroupName = "$(resourceGroupName)"
+                $moduleVersion = "2.25.0"
+
+                $modules = @(
+                  "Microsoft.Graph.Authentication",
+                  "Microsoft.Graph.Beta.Users",
+                  "Microsoft.Graph.Identity.DirectoryManagement"
+                )
+
+                foreach ($moduleName in $modules) {
+                  Write-Host "Installing module: $moduleName"
+                  New-AzAutomationModule `
+                    -AutomationAccountName $automationAccountName `
+                    -ResourceGroupName $resourceGroupName `
+                    -Name $moduleName `
+                    -ContentLinkUri "https://www.powershellgallery.com/api/v2/package/$moduleName/$moduleVersion" `
+                    -RuntimeVersion "7.2"
+                }
+
+  # --------------------------------------
+  # Stage 4: Runbook Deployment (CD)
+  # --------------------------------------
+  - stage: CD_Deployment
+    displayName: 'Runbook Deployment'
+    dependsOn: Module_Configuration
+    jobs:
+      - deployment: Deploy
+        environment: manual-approval-deploy
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: DownloadPipelineArtifact@2
+                  displayName: 'Download Runbook Artifact'
+                  inputs:
+                    artifact: 'runbookArtifact'
+                    path: '$(Pipeline.Workspace)/downloaded'
+
+                - task: AzurePowerShell@5
+                  displayName: 'Publish Runbook'
+                  inputs:
+                    azureSubscription: $(serviceConnection)
+                    ScriptType: 'InlineScript'
+                    azurePowerShellVersion: 'LatestVersion'
+                    pwsh: true
+                    Inline: |
+                      $ErrorActionPreference = "Stop"
+
+                      $runbookName = "$(runbookName)"
+                      $automationAccount = "$(automationAccountName)"
+                      $resourceGroup = "$(resourceGroupName)"
+                      $runbookFilePath = "$(Pipeline.Workspace)/downloaded/export-book.ps1"
+
+                      Write-Host "🔍 Checking if runbook '$runbookName' exists..."
+                      $runbook = Get-AzAutomationRunbook `
+                        -ResourceGroupName $resourceGroup `
+                        -AutomationAccountName $automationAccount `
+                        -Name $runbookName `
+                        -ErrorAction SilentlyContinue
+
+                      if (-not $runbook) {
+                        Write-Error "❌ Runbook '$runbookName' does not exist. Create it manually first."
+                        exit 1
+                      }
+
+                      Write-Host "✔ Runbook '$runbookName' found. Importing new content..."
+
+                      Import-AzAutomationRunbook `
+                        -ResourceGroupName $resourceGroup `
+                        -AutomationAccountName $automationAccount `
+                        -Name $runbookName `
+                        -Path $runbookFilePath `
+                        -Type PowerShell72 `
+                        -Force
+
+                      Write-Host "✔ Content imported. Publishing runbook..."
+
+                      Publish-AzAutomationRunbook `
+                        -ResourceGroupName $resourceGroup `
+                        -AutomationAccountName $automationAccount `
+                        -Name $runbookName
+
+                      Write-Host "✅ Runbook '$runbookName' published successfully."

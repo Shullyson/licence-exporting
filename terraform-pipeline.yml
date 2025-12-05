@@ -1,0 +1,66 @@
+
+trigger: none
+pr: none
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - group: TerraformSecrets  # Updated names inside this group (see note below)
+  - name: azureSubscription
+    value: prodLicenseExportPipeline  # Name of the Azure DevOps service connection
+  - name: terraformWorkingDirectory
+    value: terraform  # Path to your Terraform code
+
+stages:
+  - stage: Terraform_Deploy
+    displayName: 'Manual Terraform Deployment'
+    jobs:
+      - deployment: TerraformJob
+        displayName: 'Install and Run Terraform'
+        environment: terraform-approval-env  # Triggers manual approval in DevOps UI
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: AzureCLI@2
+                  displayName: 'Install Terraform and Deploy Infrastructure'
+                  inputs:
+                    azureSubscription: $(azureSubscription)
+                    scriptType: 'bash'
+                    scriptLocation: 'inlineScript'
+                    workingDirectory: $(terraformWorkingDirectory)
+                    inlineScript: |
+                      echo "🔧 Installing Terraform..."
+                      curl -sLo terraform.zip https://releases.hashicorp.com/terraform/1.7.0/terraform_1.7.0_linux_amd64.zip
+                      unzip terraform.zip
+                      mkdir -p $HOME/bin
+                      mv terraform $HOME/bin/
+                      export PATH=$HOME/bin:$PATH
+                      terraform version
+
+                      echo "🚀 terraform init"
+                      terraform init
+
+                      echo "🧾 Checking if RG is already imported..."
+                      if terraform state list | grep -q "azurerm_resource_group.licence_export_rg"; then
+                        echo "⏭️  Skipping import. RG already tracked by Terraform."
+                      else
+                        echo "📥 Importing resource group into Terraform state..."
+                        terraform import azurerm_resource_group.licence_export_rg "/subscriptions/${ARM_SUBSCRIPTION_ID}/resourceGroups/${TF_VAR_resource_name}"
+                      fi
+
+                      echo "📐 Running terraform plan"
+                      terraform plan \
+                        -var="tenant_id=${ARM_TENANT_ID}" \
+                        -var="service_principal_object_id=${ARM_OBJECT_ID}" \
+                        -out=tfplan.out
+
+                      echo "✅ Applying the plan"
+                      terraform apply -auto-approve tfplan.out
+                  env:
+                    ARM_SUBSCRIPTION_ID: $(azureSubscriptionId)
+                    ARM_TENANT_ID: $(azureAdTenantId)
+                    ARM_OBJECT_ID: $(servicePrincipalObjectId)

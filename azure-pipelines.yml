@@ -1,0 +1,106 @@
+trigger:
+  branches:
+    include:
+      - master
+
+pool:
+  vmImage: 'windows-latest'
+
+stages:
+  - stage: CI
+    displayName: 'Continuous Integration'
+    jobs:
+      - job: BuildAndValidate
+        displayName: 'Build and Validate'
+        steps:
+          - task: UseDotNet@2
+            inputs:
+              packageType: 'sdk'
+              version: '7.0.x'
+              installationPath: $(Agent.ToolsDirectory)/dotnet
+
+          - task: PowerShell@2
+            inputs:
+              targetType: 'inline'
+              pwsh: true
+              script: |
+                $path = '$(runbookFilePath)'
+                try {
+                  [System.Management.Automation.PSParser]::Tokenize((Get-Content $path -Raw), [ref]$null) | Out-Null
+                  Write-Host "Syntax check passed for $path"
+                } catch {
+                  Write-Error "Syntax check failed: $($_.Exception.Message)"
+                  exit 1
+                }
+
+          - task: PublishPipelineArtifact@1
+            inputs:
+              targetPath: '$(runbookFilePath)'
+              artifact: 'runbookArtifact'
+              publishLocation: 'pipeline'
+
+  - stage: CD
+    displayName: 'Continuous Deployment'
+    dependsOn: CI
+    jobs:
+      - job: Deploy
+        displayName: 'Deploy Runbook to Azure Automation'
+        steps:
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifact: 'runbookArtifact'
+              path: '$(Pipeline.Workspace)/downloaded'
+
+          - task: AzureCLI@2
+            inputs:
+              azureSubscription: $(azureSubscription)
+              scriptType: 'ps'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                $runbookName = "$(runbookName)"
+                $automationAccount = "$(automationAccount)"
+                $resourceGroup = "$(resourceGroup)"
+                $location = "$(location)"
+                $runbookFilePath = "$(Pipeline.Workspace)/downloaded/export-book.ps1"
+
+                Write-Host "Installing Azure CLI Automation extension..."
+                az extension add --name automation --yes
+
+                Write-Host "Checking if runbook '$runbookName' exists..."
+                $runbookExists = $false
+                $runbookInfo = az automation runbook list `
+                  --automation-account-name $automationAccount `
+                  --resource-group $resourceGroup `
+                  --query "[?name=='$runbookName']" `
+                  --output json | ConvertFrom-Json
+
+                if ($runbookInfo.Count -gt 0) {
+                  $runbookExists = $true
+                  Write-Host "Runbook exists."
+                } else {
+                  Write-Host "Runbook does not exist."
+                  Write-Error "❌ You must create the runbook manually with PowerShell 7.2 first."
+                  exit 1
+                }
+
+                $contentPath = $runbookFilePath -replace '\\', '/'
+                $contentArg = "@$contentPath"
+
+                Write-Host "Updating runbook content using path: $contentArg"
+                az automation runbook replace-content `
+                  --automation-account-name $automationAccount `
+                  --resource-group $resourceGroup `
+                  --name $runbookName `
+                  --content $contentArg `
+                  --only-show-errors `
+                  --output none
+
+                Write-Host "Publishing runbook..."
+                az automation runbook publish `
+                  --automation-account-name $automationAccount `
+                  --resource-group $resourceGroup `
+                  --name $runbookName `
+                  --only-show-errors `
+                  --output none
+
+                Write-Host "✅ Runbook deployed and published"
