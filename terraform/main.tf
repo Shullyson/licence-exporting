@@ -104,5 +104,5 @@ resource "azurerm_automation_runbook" "licence_export_runbook" {
   log_progress            = true
   runbook_type            = "PowerShell72"
   content                 = filebase64("../runbooks/dummy.ps1")
-  description             = "Runbook for Bertelsmann Licence Export"
+  description             = "Runbook for automated licence export"
 }

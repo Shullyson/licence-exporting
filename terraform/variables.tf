@@ -7,7 +7,7 @@ variable "location" {
 variable "resource_name" {
   description = "Base name for all resources"
   type        = string
-  default     = "DWS-Bertelsmann-testing"
+  default     = "license-export-testing"
 }
 
 variable "tenant_id" {

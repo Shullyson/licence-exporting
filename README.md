@@ -1,6 +1,6 @@
-# 📦 DWS - Bertelsmann License Export
+# 📦 License Export Automation
 
-This project defines a 4-stage Azure DevOps pipeline that provisions infrastructure, configures modules, and deploys a PowerShell runbook to an Azure Automation Account. It is designed to support multi-tenant setups via parameterized execution.
+This project defines a 4-stage Azure DevOps pipeline that provisions infrastructure, configures modules, and deploys a PowerShell runbook to an Azure Automation Account. It is designed to support multi-tenant setups via parameterized execution while keeping organization-specific details out of source control.
 
 ---
 
@@ -29,7 +29,7 @@ This pipeline is defined in **`azure-pipelines-1.yml`** and includes the followi
 
 ### 🔸 1. Service Connection
 
-- An Azure DevOps service connection must exist (e.g. `DWS-Automation-Pipeline`)
+- An Azure DevOps service connection must exist (e.g. `automation-pipeline-connection`)
 - It must be authorized for pipeline use
 - Passed as a runtime parameter: `serviceConnection`
 
@@ -62,7 +62,7 @@ Required variables in the group:
 
 1. Go to Azure DevOps → Pipelines → Run pipeline
 2. Enter the desired values for:
-   - `tenant`: Name of the variable group (e.g., `DWS-LAB`)
+   - `tenant`: Name of the variable group (e.g., `tenant-lab`)
    - `serviceConnection`: Name of the Azure DevOps service connection
 3. Click **Run**
 

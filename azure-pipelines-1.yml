@@ -7,7 +7,7 @@ pr: none
 parameters:
   - name: tenant
     type: string
-    default: DWS-LAB  # Change this when running manually for a different tenant
+    default: tenant-lab  # Change this when running manually for a different tenant
 
 variables:
   - group: ${{ parameters.tenant }}
